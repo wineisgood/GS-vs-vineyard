@@ -1,0 +1,164 @@
+#!/bin/bash
+#SBATCH -t 1:00:00
+#SBATCH -n 24
+#SBATCH -p short
+
+#Load modules
+module load eb
+module load Miniconda2
+#module load R
+
+#Load virtual env
+source activate qiime1
+
+# setting temp directory
+export TMPDIR=~/qiime_tmp
+
+# join paired ends for gordon square data
+echo join "paired ends"
+time join_paired_ends.py -m SeqPrep -b Index.fastq.gz -f Read1.fastq.gz -r Read2.fastq.gz -o SeqPrep_joined
+
+
+#splitting libraries for gordon square data
+echo "splitting libraries"
+time split_libraries_fastq.py -i SeqPrep_joined/seqprep_assembled.fastq.gz -b SeqPrep_joined/seqprep_assembled.fastq_barcodes.fastq --rev_comp_barcode --rev_comp_mapping_barcode --barcode_type 12 -o slout_q20join -m map.tsv -q 19
+
+#picking OTUs for gordon square data
+echo "picking closed ref OTUs with greengenes"
+time pick_closed_reference_otus.py -i ~/2018_02_smb/slout_q20join/seqs.fna -o OTUs -a -O 16
+
+#filter samples to retain gordon square samples
+echo 'filter samples'
+time filter_samples_from_otu_table.py -i OTUs/otu_table.biom -o edited_otu_table.biom --sample_id_fp ids.txt --negate_sample_id_fp
+
+#filter vineyard samples to only retain bulk soil
+echo 'filter bulksoil'
+time filter_samples_from_otu_table.py -i ~/vineyard/realOTUs.biom -o otu_table_bulksoil.biom -m ~/vineyard/mapping_files/44735_mapping_file.txt -s 'Description:Bulk_soil'
+
+#filter resulting vineyard samples to only retain sherwood
+echo 'filter sherwood from bulksoil'
+time filter_samples_from_otu_table.py -i otu_table_bulksoil.biom -o otu_table_sherwood.biom -m ~/vineyard/mapping_files/44735_mapping_file.txt -s 'vineyard:Sherwood'
+
+#merge OTUS from both sherwood and gordon square
+echo 'merging otus'
+time merge_otu_tables.py -i edited_otu_table.biom,otu_table_sherwood.biom -o merged_otus.biom
+
+#merge mapfiles for both vineyard and gordon square
+echo 'merging mapfiles'
+time merge_mapping_files.py -m 44735_mapping_file.txt,map.tsv -o merged_map.txt -n 'Data not collected'
+
+#core diversity analysis of combined data
+echo 'cda merged'
+time core_diversity_analyses.py -i merged_otus.biom -o cdamerged -m merged_map.txt -e 33549 -t  /home/cbmucl20/.conda/envs/qiime1/lib/python2.7/site-packages/qiime_default_reference/gg_13_8_otus/trees/97_otus.tree -a -O 8
+
+#anosim
+echo 'anosim'
+time compare_categories.py --method anosim -i cdamerged/bdiv_even33549/unweighted_unifrac_dm.txt -m merged_map.txt -c vineyard -o anosim_out -n 999
+
+#anosim
+echo 'anosim weighted'
+time compare_categories.py --method anosim -i cdamerged/bdiv_even33549/weighted_unifrac_dm.txt -m merged_map.txt -c vineyard -o anosim_outweighted -n 999
+
+#adonis
+echo 'adonis'
+time compare_categories.py --method adonis -i cdamerged/bdiv_even33549/unweighted_unifrac_dm.txt -m merged_map.txt -c vineyard -o adonis_out -n 999
+
+#compare alpha diversity
+echo 'compare alpha diversity'
+time compare_alpha_diversity.py -i cdamerged/arare_max33549/alpha_div_collated/PD_whole_tree.txt -m merged_map.txt -c vineyard -o comparedAdiversityparametric -t parametric
+
+#filter OTU for lower than 11 observed counts
+echo 'filter OTU lower than 10 counts'
+time filter_otus_from_otu_table.py -i merged_otus.biom -o merged_filtered_otus.biom -n 11
+
+#core diversity analysis of filtered data
+echo 'cda filtered '
+time core_diversity_analyses.py -i merged_filtered_otus.biom -o cdafiltered1 -m merged_map.txt -e 33273 -t  /home/cbmucl20/.conda/envs/qiime1/lib/python2.7/site-packages/qiime_default_reference/gg_13_8_otus/trees/97_otus.tree -a -O 8
+
+#summarize taxanomy
+echo "summarize taxa upper 1% absolute abundance"
+time summarize_taxa.py -i merged_otus.biom -L 1,2 -u 0.001 -o summarizedtaxaabsolute --absolute_abundance
+
+#plot taxa summaries
+echo 'plot taxa summaries'
+time plot_taxa_summary.py -i coreotus/core_otus_50.txt -o chartsagain -c pie,bar,area
+
+#make heatmap from filetered OTUs
+echo 'heatmap filtered'
+time make_otu_heatmap.py -i summarizedtaxa/merged_otus_L2.biom -o heatmap.pdf
+
+#make heatmap from merged OTUs
+echo 'heatmap L2'
+time make_otu_heatmap.py -i cdamerged/taxa_plots/table_mc33549_sorted_L2.biom -o heatmapL2.pdf
+
+#compute core microbiome
+echo 'core microbiome'
+time compute_core_microbiome.py -i merged_otus.biom -o coreotus95 --min_fraction_for_core 0.95
+
+#filter to see only L2 taxa for core
+echo 'filtered L2 core'
+time summarize_taxa.py -i coreotus95/core_table_95.biom -o L2core95absoulte -L 2 --absolute_abundance
+
+#compute core for atleast 25% prevalence in samples
+echo 'core 25%'
+time compute_core_microbiome.py -i merged_otus.biom -o coreotus25 --min_fraction_for_core 0.25
+
+#filter to see only L2 for atleast 25% prevalence in both samples
+echo filter for 25% L2
+time summarize_taxa.py -i coreotus25/core_table_25.biom -o L2core25 -L 2
+
+#plot taxa summary
+echo 'plot summary for 25% L2'
+time plot_taxa_summary.py -i L2core25/core_table_25_L2.txt -o charts25 -c bar
+
+#make heatmap for 25%
+echo 'heatmap 25'
+time make_otu_heatmap.py -i L2core25/core_table_25_L2.biom -m merged_mapsorted.txt -o heatmap25L2.pdf
+
+#making 2D plots
+echo '2d plot unweighted'
+time make_2d_plots.py -i cdamerged/bdiv_even33549/unweighted_unifrac_pc.txt -m merged_mapsorted.txt -b 'vineyard'
+
+#making 2D plots
+echo '2d plot weighted'
+time make_2d_plots.py -i cdamerged/bdiv_even33549/weighted_unifrac_pc.txt -m merged_mapsorted.txt -b 'vineyard' -o PCoA2Dweight
+
+#group significance for pH
+echo 'group significance pH for 95 L2'
+time group_significance.py -i L2core95/core_table_95_L2.biom -m merged_mapsorted.txt -s kruskal_wallis -o grpsigkwfor95PH.txt -c ph
+
+#group significance for mitrogen
+echo 'group significance N for 95 L2'
+time group_significance.py -i L2core95/core_table_95_L2.biom -m merged_mapsorted.txt -s kruskal_wallis -o grpsigkwfor95N.txt -c nitrogen_perc
+
+#form distance matrix for pH
+echo 'distance matric for pH'
+time distance_matrix_from_mapping.py -i merged_mapsorted.txt -o distancematrixpH -c ph
+
+#compare distance matrix for pH
+echo 'compare distance matrix pH'
+time compare_distance_matrices.py --method=mantel -i cdamerged/bdiv_even33549/unweighted_unifrac_dm.txt,distancematrixpH.txt -o mantel_pH -n 999
+
+#form distance matrix for mitrogen perc
+echo 'distance matric for nitrogen perc'
+time distance_matrix_from_mapping.py -i merged_mapsorted.txt -o distancematrixN -c nitrogen_perc
+
+#compare distance matrix for nitrogen perc
+echo 'compare distance matrix nitrogen perc'
+time compare_distance_matrices.py --method=mantel -i cdamerged/bdiv_even33549/unweighted_unifrac_dm.txt,distance.atrixN.txt -o mantel_N -n 999
+
+#group significance ANOVA
+echo 'group significance ANOVA vineyard'
+time group_significance.py -i L2core95/core_table_95_L2.biom -m merged_mapsorted.txt -s ANOVA -o grpsigANOVA95.txt -c vineyard
+
+#make distance boxplots
+echo 'make distance boxplots'
+time make_distance_boxplots.py -m merged_mapsorted.txt -d cdamerged/bdiv_even33549/unweighted_unifrac_dm.txt -f vineyard -o distance_boxplot
+
+#aummarise taxa plotted
+echo 'summarise taxa plot'
+time summarize_taxa_through_plots.py -i merged_otus.biom -o plottedsummarytaxa -m merged_mapsorted.txt -c vineyard
+
+
+#deactivate env
+source deactivate
